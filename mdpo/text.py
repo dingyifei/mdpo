@@ -156,6 +156,15 @@ def wrap_different_first_line_width(
             placeholder='?',
             **kwargs,
         )[0]
+        if len(li_first_line) > width:
+            kwargs["break_long_words"] = True
+            li_first_line = textwrap.wrap(
+            text,
+            width=width + first_line_width_diff,
+            max_lines=4,
+            placeholder='?',
+            **kwargs,
+        )[0]
         li_subsequent_lines = textwrap.wrap(
             text[len(li_first_line):],
             width=width,
@@ -166,24 +175,16 @@ def wrap_different_first_line_width(
             li_first_line,
             *li_subsequent_lines,
         ]
+        return [
+            li_first_line,
+            *li_subsequent_lines,
+        ]
 
     return textwrap.wrap(
         text,
         width=width,
         **kwargs,
     )
-
-
-def striplastline(text):
-    """Returns a text, ignoring the last line.
-
-    Args:
-        text (str): Text that will be returned ignoring its last line.
-
-    Returns:
-        str: Text wihout their last line.
-    """
-    return '\n'.join(text.split('\n')[:-1])
 
 
 def removeprefix(text, prefix):
@@ -205,7 +206,7 @@ def removeprefix(text, prefix):
         return text.removeprefix(prefix)
     if text.startswith(prefix):
         return text[len(prefix):]
-    return text
+    return text  # pragma: no cover
 
 
 def removesuffix(text, suffix):
@@ -228,4 +229,4 @@ def removesuffix(text, suffix):
         return text.removesuffix(suffix)
     if suffix and text.endswith(suffix):
         return text[:-len(suffix)]
-    return text
+    return text  # pragma: no cover

@@ -30,7 +30,8 @@ def build_parser():
              ' read from STDIN.',
     )
     parser.add_argument(
-        '-p', '--pofiles', metavar='POFILES', action='append', nargs='*',
+        '-p', '--po-files', '--pofiles', metavar='POFILES', action='append',
+        nargs='*', dest='pofiles',
         help='Glob matching a set of PO files from where to extract references'
              ' to make the replacements translating strings. This argument'
              ' can be passed multiple times.',
@@ -69,10 +70,15 @@ def parse_options(args):
         sys.exit(0)
     opts = parser.parse_args(args)
 
+    filepath_or_content = ''
     if not sys.stdin.isatty():
-        opts.filepath_or_content = sys.stdin.read().strip('\n')
-    elif isinstance(opts.filepath_or_content, list):
-        opts.filepath_or_content = opts.filepath_or_content[0]
+        filepath_or_content += sys.stdin.read().strip('\n')
+    if (
+        isinstance(opts.filepath_or_content, list)
+        and opts.filepath_or_content
+    ):
+        filepath_or_content += opts.filepath_or_content[0]
+    opts.filepath_or_content = filepath_or_content
 
     opts.command_aliases = parse_command_aliases_cli_arguments(
         opts.command_aliases,
