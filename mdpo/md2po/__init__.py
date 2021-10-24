@@ -21,12 +21,13 @@ from mdpo.po import (
     mark_not_found_entries_as_obsoletes,
     po_escaped_string,
     remove_not_found_entries,
+    save_pofile_checking_file_changed,
 )
-from mdpo.text import min_not_max_chars_in_a_row
+from mdpo.text import min_not_max_chars_in_a_row, parse_wrapwidth_argument
 
 
 class Md2Po:
-    __slots__ = (
+    __slots__ = {
         'filepaths',
         'content',
         'pofile',
@@ -34,7 +35,6 @@ class Md2Po:
         'msgstr',
         'found_entries',
         'disabled_entries',
-        'wrapwidth',
         'ignore_msgids',
         'command_aliases',
         'mark_not_found_as_obsolete',
@@ -59,6 +59,7 @@ class Md2Po:
         '_enable_next_line',
         '_include_next_codeblock',
         '_disable_next_codeblock',
+        '_saved_files_changed',
 
         '_enterspan_replacer',
         '_leavespan_replacer',
@@ -92,6 +93,7 @@ class Md2Po:
         '_inside_htmlblock',
         '_inside_codeblock',
         '_inside_pblock',
+        '_inside_aspan',
         '_inside_liblock',
         '_inside_codespan',
         '_inside_olblock',
@@ -99,12 +101,13 @@ class Md2Po:
         '_quoteblocks_deep',
         '_codespan_start_index',
         '_codespan_backticks',
-        '_current_aspan_target',
+        '_current_aspan_text',
+        '_current_aspan_ref_target',
         '_current_wikilink_target',
         '_current_imgspan',
         '_uls_deep',
         '_link_references',
-    )
+    }
 
     def __init__(self, glob_or_content, **kwargs):
         is_glob, glob_or_content = to_glob_or_content(glob_or_content)
@@ -125,7 +128,6 @@ class Md2Po:
         self._current_tcomment = None
         self._current_msgctxt = None
 
-        self.wrapwidth = kwargs.get('wrapwidth', 78)
         self.ignore_msgids = kwargs.get('ignore_msgids', [])
         self.command_aliases = normalize_mdpo_command_aliases(
             kwargs.get('command_aliases', {}),
@@ -168,6 +170,10 @@ class Md2Po:
         self._include_next_codeblock = False
         self._disable_next_codeblock = False
 
+        self._saved_files_changed = (  # pragma: no cover
+            False if kwargs.get('_check_saved_files_changed') else None
+        )
+
         self.metadata = {}
 
         if not self.plaintext:
@@ -203,9 +209,6 @@ class Md2Po:
                 self.code_end_string,
             )
 
-            self.link_start_string = kwargs.get('link_start_string', '[')
-            self.link_end_string = kwargs.get('link_end_string', ']')
-
             _include_xheaders = kwargs.get('xheaders', False)
 
             if _include_xheaders:
@@ -216,22 +219,18 @@ class Md2Po:
                     'x-mdpo-italic-end': self.italic_end_string,
                     'x-mdpo-code-start': self.code_start_string,
                     'x-mdpo-code-end': self.code_end_string,
-                    'x-mdpo-link-start': self.link_start_string,
-                    'x-mdpo-link-end': self.link_end_string,
                 })
 
             self._enterspan_replacer = {
                 md4c.SpanType.STRONG.value: self.bold_start_string,
                 md4c.SpanType.EM.value: self.italic_start_string,
                 md4c.SpanType.CODE.value: self.code_start_string,
-                md4c.SpanType.A.value: self.link_start_string,
             }
 
             self._leavespan_replacer = {
                 md4c.SpanType.STRONG.value: self.bold_end_string,
                 md4c.SpanType.EM.value: self.italic_end_string,
                 md4c.SpanType.CODE.value: self.code_end_string,
-                md4c.SpanType.A.value: self.link_end_string,
             }
 
             if 'strikethrough' in self.extensions:
@@ -350,7 +349,12 @@ class Md2Po:
         self._codespan_start_index = None
         self._codespan_backticks = None
 
-        self._current_aspan_target = None
+        self._inside_aspan = False
+        self._current_aspan_text = ''
+        # indicates the target of the current link, which is referenced and
+        # extracted without using MD4C, so we can preserve it as referenced
+        self._current_aspan_ref_target = None
+
         self._link_references = None
         self._current_wikilink_target = None
         self._current_imgspan = {}
@@ -390,7 +394,7 @@ class Md2Po:
             #       if the user has configured an `enter_block` or
             #       `leave_block` event remembering that
             #       `_current_top_level_block_number` and
-            #       _current_top_level_block_type` properties must be handled
+            #       `_current_top_level_block_type` properties must be handled
             #       accordingly
 
             occurrence = (
@@ -646,17 +650,31 @@ class Md2Po:
         if not self.plaintext:
             # underline spans for double '_' character enters two times
             if not self._inside_uspan:
-                try:
-                    self._current_msgid += self._enterspan_replacer[span.value]
-                except KeyError:
-                    pass
+                if self._inside_aspan:  # span inside link text
+                    try:
+                        self._current_aspan_text += self._enterspan_replacer[
+                            span.value
+                        ]
+                    except KeyError:
+                        pass
+                else:
+                    try:
+                        self._current_msgid += (
+                            self._enterspan_replacer[span.value]
+                        )
+                    except KeyError:
+                        pass
 
             if span is md4c.SpanType.A:
+                # here resides the logic of discover if the current link
+                # is referenced
                 if self._link_references is None:
                     self._link_references = parse_link_references(self.content)
 
+                self._inside_aspan = True
+
                 current_aspan_href = details['href'][0][1]
-                self._current_aspan_target = None
+                self._current_aspan_ref_target = None
 
                 if details['title']:
                     current_aspan_title = details['title'][0][1]
@@ -665,12 +683,12 @@ class Md2Po:
                             href == current_aspan_href and
                             title == current_aspan_title
                         ):
-                            self._current_aspan_target = target
+                            self._current_aspan_ref_target = target
                             break
                 else:
                     for target, href, title in self._link_references:
                         if href == current_aspan_href:
-                            self._current_aspan_target = target
+                            self._current_aspan_ref_target = target
                             break
 
             elif span is md4c.SpanType.CODE:
@@ -705,30 +723,60 @@ class Md2Po:
                 if span is md4c.SpanType.WIKILINK:
                     self._current_msgid += self._current_wikilink_target
                     self._current_wikilink_target = None
-
-                try:
-                    self._current_msgid += self._leavespan_replacer[span.value]
-                except KeyError:
-                    pass
+                if self._inside_aspan:  # span inside link text
+                    try:
+                        self._current_aspan_text += self._leavespan_replacer[
+                            span.value
+                        ]
+                    except KeyError:
+                        pass
+                else:
+                    try:
+                        self._current_msgid += (
+                            self._leavespan_replacer[span.value]
+                        )
+                    except KeyError:
+                        pass
 
             if span is md4c.SpanType.A:
-                if self._current_aspan_target:  # reference link
-                    self._current_msgid += f'[{self._current_aspan_target}]'
-                    self._current_aspan_target = None
-                else:
-                    self._current_msgid += '({}{})'.format(
-                        details['href'][0][1],
-                        '' if not details['title'] else ' "{}"'.format(
-                            details['title'][0][1],
-                        ),
+                if self._current_aspan_ref_target:  # referenced link
+                    self._current_msgid += (
+                        f'[{self._current_aspan_text}]'
+                        f'[{self._current_aspan_ref_target}]'
                     )
+                    self._current_aspan_ref_target = None
+                else:
+                    if self._current_aspan_text == details['href'][0][1]:
+                        # autolink vs link clash (see implementation notes)
+                        self._current_msgid += f'<{self._current_aspan_text}'
+                        if details['title']:
+                            self._current_msgid += ' "{}"'.format(
+                                details['title'][0][1],
+                            )
+                        self._current_msgid += '>'
+                    else:
+                        self._current_msgid += '[{}]({}{})'.format(
+                            self._current_aspan_text,
+                            details['href'][0][1],
+                            '' if not details['title'] else ' "{}"'.format(
+                                details['title'][0][1],
+                            ),
+                        )
+                self._inside_aspan = False
+                self._current_aspan_text = ''
             elif span is md4c.SpanType.CODE:
                 self._inside_codespan = False
                 self._codespan_start_index = None
+
                 # add backticks at the end for escape internal backticks
-                self._current_msgid += (
-                    self._codespan_backticks * self.code_end_string
-                )
+                if self._inside_aspan:
+                    self._current_aspan_text += (
+                        self._codespan_backticks * self.code_end_string
+                    )
+                else:
+                    self._current_msgid += (
+                        self._codespan_backticks * self.code_end_string
+                    )
                 self._codespan_backticks = None
             elif span is md4c.SpanType.IMG:
                 self._current_msgid += '![{}]({}'.format(
@@ -751,7 +799,9 @@ class Md2Po:
 
         if not self._inside_htmlblock:
             if not self._inside_codeblock:
-                if self._inside_liblock and text == '\n':
+                if any([  # softbreaks
+                    self._inside_liblock, self._inside_aspan,
+                ]) and text == '\n':
                     text = ' '
                 if not self.plaintext:
                     if self._current_imgspan:
@@ -769,6 +819,12 @@ class Md2Po:
                             self._codespan_backticks * self.code_start_string,
                             self._current_msgid[self._codespan_start_index:],
                         )
+                        if self._inside_aspan:
+                            self._current_aspan_text += text
+                            return
+                    elif self._inside_aspan:
+                        self._current_aspan_text += text
+                        return
                     elif text == self.italic_start_string:
                         text = self.italic_start_string_escaped
                     elif text == self.code_start_string:
@@ -829,12 +885,13 @@ class Md2Po:
         mo_filepath=None,
         po_encoding=None,
         md_encoding='utf-8',
+        wrapwidth=78,
     ):
         if not po_filepath:
             self.po_filepath = ''
 
             if save:
-                if os.environ.get('MD2PO_CLI') == 'true':
+                if os.environ.get('_MDPO_RUNNING') == 'true':
                     save_arg = '-s/--save'
                     po_filepath_arg = '-po/--po-filepath'
                 else:
@@ -854,7 +911,7 @@ class Md2Po:
         )
         self.pofile = polib.pofile(
             self.po_filepath,
-            wrapwidth=self.wrapwidth,
+            wrapwidth=parse_wrapwidth_argument(wrapwidth),
             **pofile_kwargs,
         )
 
@@ -902,8 +959,14 @@ class Md2Po:
         if self.metadata:
             self.pofile.metadata.update(self.metadata)
 
-        if save and self.po_filepath:
-            self.pofile.save(fpath=self.po_filepath)
+        if save and po_filepath:
+            if self._saved_files_changed is False:  # pragma: no cover
+                self._saved_files_changed = save_pofile_checking_file_changed(
+                    self.pofile,
+                    po_filepath,
+                )
+            else:
+                self.pofile.save(fpath=po_filepath)
         if mo_filepath:
             self.pofile.save_as_mofile(mo_filepath)
         return self.pofile
@@ -1056,7 +1119,6 @@ def markdown_to_pofile(
         ignore=ignore,
         msgstr=msgstr,
         plaintext=plaintext,
-        wrapwidth=wrapwidth,
         mark_not_found_as_obsolete=mark_not_found_as_obsolete,
         preserve_not_found=preserve_not_found,
         location=location,
@@ -1075,4 +1137,5 @@ def markdown_to_pofile(
         mo_filepath=mo_filepath,
         po_encoding=po_encoding,
         md_encoding=md_encoding,
+        wrapwidth=wrapwidth,
     )
