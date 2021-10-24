@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from uuid import uuid4
 
 import pytest
 
@@ -98,7 +99,7 @@ def test_debug(capsys, arg):
     for i, line in enumerate(outlines):
         assert re.match(
             (
-                r'^md2po\[DEBUG\]::\d{4,}-\d\d-\d\d\s\d\d:\d\d:\d\d::'
+                r'^md2po\[DEBUG\]::\d{4,}-\d\d-\d\d\s\d\d:\d\d:\d\d\.\d+::'
                 r'(text|link_reference|msgid|command|enter_block|'
                 r'leave_block|enter_span|leave_span)::'
             ),
@@ -180,6 +181,32 @@ msgstr ""
 
         with open(pofile_path) as f:
             assert f.read() == expected_output
+
+    assert exitcode == 0
+    assert pofile.__unicode__() == expected_output
+    assert striplastline(out) == expected_output
+
+    # new PO file creation
+    pofile_path = os.path.join(tempfile.gettempdir(), uuid4().hex[:8])
+    pofile, exitcode = run([
+        '# Bar\n',
+        arg,
+        '-po',
+        pofile_path,
+        '-m',
+        '--no-location',
+    ])
+    out, err = capsys.readouterr()
+
+    expected_output = '''#
+msgid ""
+msgstr ""
+
+msgid "Bar"
+msgstr ""
+'''
+    with open(pofile_path) as f:
+        assert f.read() == expected_output
 
     assert exitcode == 0
     assert pofile.__unicode__() == expected_output
@@ -271,40 +298,26 @@ msgstr ""
 
 
 @pytest.mark.parametrize('arg', ['-w', '--wrapwidth'])
-def test_wrapwidth(striplastline, capsys, arg):
+@pytest.mark.parametrize('value', ['0', 'inf'])
+def test_wrapwidth(striplastline, capsys, arg, value):
     content = (
         '# Some long header with **bold characters**, '
         '*italic characters* and a [link](https://nowhere.nothing).\n'
     )
-    width = 20
 
-    pofile, exitcode = run([content, arg, str(width), '-p'])
+    pofile, exitcode = run([content, arg, value, '-p'])
     out, err = capsys.readouterr()
 
     expected_output = '''#
 msgid ""
 msgstr ""
 
-msgid ""
-"Some long header "
-"with bold "
-"characters, italic"
-" characters and a "
-"link."
+msgid "Some long header with bold characters, italic characters and a link."
 msgstr ""
 '''
-
     assert exitcode == 0
     assert pofile.__unicode__() == expected_output
     assert striplastline(out) == expected_output
-
-    _line_with_provided_width_found = False
-    for line in pofile.__unicode__().split('\n'):
-        if len(line) == width:
-            _line_with_provided_width_found = True
-            break
-
-    assert _line_with_provided_width_found
 
 
 @pytest.mark.parametrize('arg', ['-a', '--xheaders'])
@@ -327,8 +340,6 @@ msgstr ""
 "x-mdpo-latexmath-start: $\\n"
 "x-mdpo-latexmathdisplay-end: $$\\n"
 "x-mdpo-latexmathdisplay-start: $$\\n"
-"x-mdpo-link-end: ]\\n"
-"x-mdpo-link-start: [\\n"
 "x-mdpo-strikethrough-end: ~~\\n"
 "x-mdpo-strikethrough-start: ~~\\n"
 "x-mdpo-wikilink-end: ]]\\n"
@@ -597,18 +608,18 @@ def test_extensions(
 @pytest.mark.parametrize(
     'value',
     (None, 'foo'),
-    ids=('MDPO_CLI=', 'MDPO_CLI=foo'),
+    ids=('_MDPO_RUNNING=', '_MDPO_RUNNING=foo'),
 )
 def test_md2po_cli_running_osenv(striplastline, value, capsys):
     if value is not None:
-        os.environ['MDPO_CLI'] = value
+        os.environ['_MDPO_RUNNING'] = value
     pofile, exitcode = run([EXAMPLE['input']])
     out, err = capsys.readouterr()
 
     assert exitcode == 0
     assert pofile.__unicode__() == EXAMPLE['output']
     assert striplastline(out) == EXAMPLE['output']
-    assert os.environ.get('MDPO_CLI') == value
+    assert os.environ.get('_MDPO_RUNNING') == value
 
 
 def test_md2po_save_without_po_filepath():
